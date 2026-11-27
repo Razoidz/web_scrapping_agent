@@ -14,6 +14,53 @@ The comparison is organized into:
 
 The script tries the configured Gemini models in order and uses the first one that succeeds.
 
+## Agent architecture
+
+The agent is a tool-using Gemini chat wrapped by a small Python runner. `main.py` supplies the task and editorial instructions; Gemini decides when to call the registered `scrape_newspaper` tool for each URL. That tool delegates page retrieval and HTML parsing to `webscrapper_tool.py`, then returns a compact text list to Gemini. Gemini uses the collected tool results to write the comparison, which the runner prints to the terminal.
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    A[Start: main.py] --> B[Load .env]
+    B --> C[Create Gemini client]
+    C --> D[Select model from fallback list]
+    D --> E[Create chat with system instructions and scrape_newspaper tool]
+    E --> F[Send prompt containing newspaper URLs]
+    F --> G{Gemini requests a tool call?}
+    G -- Yes, for each outlet --> H[scrape_newspaper URL]
+    H --> I[HTTP GET with requests]
+    I --> J[Parse HTML with Beautiful Soup]
+    J --> K[Remove page chrome; collect unique h2/h3 text over 20 characters]
+    K --> L[Keep up to 20 results and format as text]
+    L --> M[Return tool result to Gemini]
+    M --> G
+    G -- No, analysis is ready --> N[Return comparison response]
+    N --> O[Print response.text]
+    E -. Gemini APIError .-> P[Wait 2 seconds and try next configured model]
+    P --> D
+    I -. Request error .-> Q[Return readable fetch error as tool text]
+    Q --> M
+```
+
+### How the pieces connect
+
+| Piece | Responsibility | Connects to |
+| --- | --- | --- |
+| `main.py` runner | Loads environment variables, creates the Gemini client and chat, sends the prompt, handles model fallback, and prints the final response. | Gemini SDK, `scrape_newspaper`, terminal |
+| System instruction and prompt | Define the editor role, comparison sections, and the newspaper URLs to process. | Gemini chat |
+| `scrape_newspaper(url)` tool | Calls the scraper, limits results to 20, and formats headlines as text for the model. | Gemini tool interface, `scrape_article_headlines` |
+| `scrape_article_headlines(url)` | Makes the HTTP request and extracts unique headline text from static page HTML. Request failures are returned as readable text. | Newspaper website, `requests`, Beautiful Soup |
+| Gemini model | Requests scraper calls, receives their results, compares coverage, and produces the final analysis. | Prompt, tool results, runner |
+
+### Runtime sequence
+
+1. `main.py` loads `.env`; `google-genai` reads `GEMINI_API_KEY` when `genai.Client()` is created.
+2. For each configured model, the runner creates a chat with the system instruction and registers `scrape_newspaper` as an available function tool.
+3. The runner sends the prompt. Gemini can invoke the tool once for each newspaper URL; the function calls `scrape_article_headlines` and returns up to 20 formatted headlines.
+4. Gemini receives tool results in the chat and writes the requested comparison. The runner prints `response.text` and stops trying models.
+5. If a Gemini API call raises `APIError`, the runner logs the failure, waits two seconds, and tries the next configured model. HTTP request errors are handled inside the scraper and returned to Gemini as text so the model can continue with other outlets.
+
 ## Requirements
 
 - Python 3.10 or newer
